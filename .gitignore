@@ -1,0 +1,49 @@
+# Ignore l'environnement virtuel
+venv/
+
+# Fichiers Python compilés
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Fichiers de log
+*.log
+
+# Fichiers de base de données SQLite (si utilisés pour dev)
+*.sqlite3
+*.db
+
+# Enregistrements de sessions Flask (si stockés en fichier)
+instance/
+*.pid
+
+# Caches d'éditeur et fichiers système
+.DS_Store
+Thumbs.db
+
+# Paramètres d'IDE ou d'éditeur
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Fichiers de test
+htmlcov/
+.coverage
+.tox/
+nosetests.xml
+coverage.xml
+*.cover
+.cache
+
+# Fichiers Pytest
+.pytest_cache/
+
+# Distribution / build
+build/
+dist/
+*.egg-info/
+
+# Fichiers secrets potentiels
+.env
+*.env
