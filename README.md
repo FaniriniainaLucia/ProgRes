@@ -1,120 +1,125 @@
-# 🔀 NAT Gateway Python (avec Interface Web)
+# NAT Router Python - Projet Routeur Logiciel Multi-Clients
 
-Ce projet est une passerelle NAT (Network Address Translation) écrite en **Python pur**, avec une **interface web** pour :
-
-- Configurer les interfaces réseau
-- Visualiser la table NAT en temps réel
-- Afficher les clients connectés et leur trafic
+Ce projet est une application Python qui implémente un routeur logiciel capable de faire du NAT (Network Address Translation) entre deux interfaces réseau (LAN/WAN), de superviser le trafic réseau, et de visualiser dynamiquement les activités du réseau local.
 
 ---
 
-## 🧰 Dépendances
+## 🌐 Objectif principal
 
-Ce projet utilise :
+Construire un **routeur logiciel portable** (Linux, Windows, macOS) qui :
 
-- `Flask` : interface web
-- `psutil` : détection des interfaces
-- `scapy` : manipulation des paquets IP
-- `NetfilterQueue` : interception des paquets via `iptables`
-- `libnetfilter-queue-dev` : dépendance native obligatoire
-
----
-
-## ⚙️ Installation (Linux Debian/Ubuntu)
-
-### 1. Installer les paquets système :
-
-```bash
-sudo apt update
-sudo apt install -y \
-    python3 python3-venv python3-full \
-    python3-pip \
-    libnfnetlink-dev libnetfilter-queue-dev
-```
-
-### 2. Créer et activer un environnement virtuel :
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
-
-### 3. Installer les dépendances Python :
-
-```bash
-pip install flask psutil scapy NetfilterQueue
-```
+* Traduit les adresses IP et ports (SNAT/DNAT)
+* Supervise le trafic réseau (volume, protocoles, connexions par client)
+* Fournit une interface web pour contrôle et visualisation
+* Gère plusieurs clients simultanément (Python ou non)
+* Ne dépend d'aucun outil spécifique à Linux (iptables, /proc/sys/net/...)
 
 ---
 
-## 🚀 Lancement de l’application
+## 🚧 Fonctionnalités principales
 
-Tu dois lancer l’application **avec les privilèges root**, mais en gardant le Python du venv :
+### NAT (Network Address Translation)
 
-```bash
-sudo venv/bin/python app.py
-```
+* Traitement bidirectionnel (LAN <-> WAN)
+* Traduction manuelle des adresses et ports
+* Table NAT dynamique avec expiration possible
 
-Le serveur Flask sera accessible sur :
+### Supervision et Monitoring
 
-```
-http://localhost:5000
-```
+* Identification des clients LAN
+* Suivi du trafic par IP (packets, octets, connexions)
+* Visualisation temps réel via l'interface web (JS + WebSocket/AJAX)
 
----
+### Interface web Flask
 
-## 🌐 Interface Web
+* Formulaire de sélection des interfaces LAN/WAN
+* Affichage de la table NAT
+* Vue par client : trafic, protocoles, connexions
 
-L’interface permet de :
+### Support multi-plateforme
 
-- Choisir les interfaces LAN / WAN
-- Afficher la table NAT en temps réel
-- Voir les clients connectés (IP, ports, protocoles)
-- Suivre le trafic par client (à venir)
-
----
-
-## 🧪 Environnement de test recommandé
-
-- Utiliser **Hyper-V** avec :
-  - une interface en **réseau interne** (LAN)
-  - une interface en **bridge** ou **partage de connexion** (WAN)
-- Ou bien :
-  - un téléphone Android en partage USB
-  - un point d’accès Wi-Fi émis par la même machine
+* Fonctionne sous Linux, Windows et macOS
+* Installation simple avec `pip` ou via binaire `PyInstaller`
 
 ---
 
-## 📌 Notes
-
-- L’application intercepte et modifie le trafic réseau en temps réel
-- Elle s’appuie sur `iptables` et `NetfilterQueue`, donc nécessite les droits root
-- Les règles `iptables` sont ajoutées automatiquement au lancement (à implémenter)
-
----
-
-## 📎 Structure du projet
+## 📁 Structure du projet
 
 ```
 nat_gateway/
-├── app.py               # Serveur Flask + interface web
-├── nat_core.py          # Logique NAT (paquets, table NAT)
-├── net_utils.py         # Utilitaires réseau
-├── templates/
-│   └── index.html       # Interface HTML principale
-├── static/              # (à ajouter si besoin de CSS ou JS)
-├── venv/                # Environnement Python virtuel (ne pas versionner)
-└── README.md            # Ce fichier
+│
+├── core/
+│   ├── nat_engine.py
+│   ├── packet_capture.py
+│   ├── client_tracker.py
+│   └── ...
+│
+├── web/
+│   ├── templates/
+│   │   └── index.html
+│   ├── static/
+│   └── dashboard.py
+│
+├── clients/
+│   ├── test_client.py
+│   └── ...
+│
+├── utils/
+│   └── network.py
+│
+├── README.md
+└── requirements.txt
+
 ```
 
 ---
 
-## ✅ À faire / TODO
+## ⚡ Installation rapide
 
-- [ ] Suivi du trafic (octets envoyés/reçus)
-- [ ] Logs des connexions
-- [ ] Blocage par IP/MAC
-- [ ] Configuration persistante (fichier .json ou .yaml)
-- [ ] Tests avec clients Python automatisés
+```bash
+# 1. Cloner le dépôt
+git clone https://github.com/votre-utilisateur/nat-router-python.git
+cd nat-router-python
+
+# 2. Installer les dépendances
+pip install -r requirements.txt
+
+# 3. Lancer l'application web
+python app.py
+```
 
 ---
+
+## 🚀 État du projet
+
+| Composant                    | Statut          |
+| ---------------------------- | --------------- |
+| NAT bidirectionnel           | ⭕ à implémenter |
+| Table NAT dynamique          | ⭕ à implémenter |
+| Interface web de base        | ✅ Fonctionnelle |
+| Monitoring par client        | ⭕ à implémenter |
+| Support clients Python/non   | ⭕ en cours      |
+| Installation multiplateforme | ✅ Compatible    |
+
+---
+
+## 🌐 Contribuer
+
+Toute aide est la bienvenue pour :
+
+* Ajouter des graphes temps réel
+* Améliorer la reconnaissance des clients LAN
+* Implémenter un timeout pour les connexions NAT inactives
+
+---
+
+## 🛡️ Avertissement
+
+Ce projet accède directement aux paquets réseau et peut nécessiter les droits root/admin sur certaines plateformes.
+Utiliser à des fins éducatives ou de laboratoire. Ne jamais utiliser sur un réseau public sans autorisation.
+
+---
+
+## 📅 Auteur
+
+Ambinintsoa Marckel - 2025

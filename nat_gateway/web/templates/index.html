@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NAT Gateway Manager</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .status-active { color: #28a745; }
+        .status-inactive { color: #dc3545; }
+        .table-container { max-height: 400px; overflow-y: auto; }
+        .update-indicator { 
+            position: fixed; 
+            top: 10px; 
+            right: 10px; 
+            background: rgba(0,123,255,0.8); 
+            color: white; 
+            padding: 5px 10px; 
+            border-radius: 5px; 
+            display: none;
+        }
+        .connection-row:hover {
+            background-color: #f8f9fa;
+        }
+        .protocol-badge {
+            font-size: 0.8em;
+        }
+        .stats-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <h1 class="mb-4">🌐 NAT Gateway Manager</h1>
+        
+        <div class="update-indicator" id="updateIndicator">
+            Mise à jour...
+        </div>
+        
+        {% if error %}
+        <div class="alert alert-danger">{{ error }}</div>
+        {% endif %}
+        
+        <div class="row">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5>Configuration NAT</h5>
+                    </div>
+                    <div class="card-body">
+                        {% if not config.status %}
+                        <form method="POST">
+                            <div class="mb-3">
+                                <label for="lan" class="form-label">Interface LAN:</label>
+                                <select name="lan" id="lan" class="form-select" required>
+                                    <option value="">Sélectionner...</option>
+                                    {% for iface in interfaces %}
+                                    <option value="{{ iface.name }}">{{ iface.name }} ({{ iface.ip }})</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label for="wan" class="form-label">Interface WAN:</label>
+                                <select name="wan" id="wan" class="form-select" required>
+                                    <option value="">Sélectionner...</option>
+                                    {% for iface in interfaces %}
+                                    <option value="{{ iface.name }}">{{ iface.name }} ({{ iface.ip }})</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            
+                            <button type="submit" class="btn btn-primary">🚀 Démarrer NAT</button>
+                        </form>
+                        {% else %}
+                        <div class="alert alert-success">
+                            <h6 class="status-active">✅ NAT Actif</h6>
+                            <p><strong>LAN:</strong> {{ config.lan }}</p>
+                            <p><strong>WAN:</strong> {{ config.wan }} ({{ config.wan_ip }})</p>
+                        </div>
+                        <a href="/stop" class="btn btn-danger">🛑 Arrêter NAT</a>
+                        {% endif %}
+                    </div>
+                </div>
+                
+                <div class="card mt-3">
+                    <div class="card-header">
+                        <h6>Actions</h6>
+                    </div>
+                    <div class="card-body">
+                        <a href="/debug" class="btn btn-info btn-sm">🔍 Debug</a>
+                        <button onclick="toggleAutoRefresh()" class="btn btn-secondary btn-sm" id="refreshBtn">
+                            ⏸️ Pause Auto-refresh
+                        </button>
+                        <button onclick="clearNatTable()" class="btn btn-warning btn-sm">🗑️ Vider Table</button>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5>Table NAT</h5>
+                        <small class="text-muted" id="lastUpdate">Dernière mise à jour: --</small>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-container" id="natTableContainer">
+                            <div class="text-center text-muted">
+                                Chargement de la table NAT...
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Statistiques -->
+                <div class="card mt-3 stats-card">
+                    <div class="card-header">
+                        <h6 class="mb-0">📊 Statistiques en temps réel</h6>
+                    </div>
+                    <div class="card-body">
+                        <div class="row text-center">
+                            <div class="col-4">
+                                <h4 id="activeConnections">0</h4>
+                                <small>Connexions</small>
+                            </div>
+                            <div class="col-4">
+                                <h4 id="totalBytes">0 B</h4>
+                                <small>Données</small>
+                            </div>
+                            <div class="col-4">
+                                <h4 id="totalPackets">0</h4>
+                                <small>Paquets</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/js/bootstrap.bundle.min.js"></script>
+    <script>
+        let autoRefreshEnabled = true;
+        let refreshInterval;
+        
+        function updateNatTable() {
+            if (!autoRefreshEnabled) return;
+            
+            const indicator = document.getElementById('updateIndicator');
+            const container = document.getElementById('natTableContainer');
+            const lastUpdate = document.getElementById('lastUpdate');
+            
+            // Afficher l'indicateur de mise à jour
+            indicator.style.display = 'block';
+            
+            fetch('/nat_table_json')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        let html = `<p><small>Connexions actives: ${data.stats.active_connections}</small></p>`;
+                        
+                        if (data.connections && data.connections.length > 0) {
+                            html += `
+                                <table class="table table-sm table-hover">
+                                    <thead class="table-dark">
+                                        <tr>
+                                            <th>Protocole</th>
+                                            <th>Source</th>
+                                            <th>Destination</th>
+                                            <th>État</th>
+                                            <th>Durée</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                            `;
+                            
+                            data.connections.forEach(conn => {
+                                const protocolColor = conn.protocol === 'TCP' ? 'primary' : 'success';
+                                const stateColor = conn.state === 'ESTABLISHED' ? 'success' : 
+                                                 conn.state === 'TIME_WAIT' ? 'warning' : 'secondary';
+                                
+                                html += `
+                                    <tr class="connection-row">
+                                        <td><span class="badge bg-${protocolColor} protocol-badge">${conn.protocol}</span></td>
+                                        <td>${conn.src_ip}:${conn.src_port}</td>
+                                        <td>${conn.dst_ip}:${conn.dst_port}</td>
+                                        <td><span class="badge bg-${stateColor}">${conn.state}</span></td>
+                                        <td>${conn.duration || 'N/A'}</td>
+                                    </tr>
+                                `;
+                            });
+                            
+                            html += '</tbody></table>';
+                        } else {
+                            html += '<div class="text-center text-muted">Aucune connexion active</div>';
+                        }
+                        
+                        container.innerHTML = html;
+                        
+                        // Mettre à jour les statistiques
+                        updateStats(data.stats);
+                        
+                        // Mettre à jour l'heure de dernière mise à jour
+                        lastUpdate.textContent = `Dernière mise à jour: ${new Date().toLocaleTimeString()}`;
+                    } else {
+                        container.innerHTML = `<div class="alert alert-warning">${data.message || 'Erreur lors du chargement'}</div>`;
+                    }
+                })
+                .catch(error => {
+                    console.error('Erreur:', error);
+                    container.innerHTML = '<div class="alert alert-danger">Erreur de connexion</div>';
+                })
+                .finally(() => {
+                    // Masquer l'indicateur de mise à jour
+                    setTimeout(() => {
+                        indicator.style.display = 'none';
+                    }, 300);
+                });
+        }
+        
+        function updateStats(stats) {
+            document.getElementById('activeConnections').textContent = stats.active_connections || 0;
+            document.getElementById('totalBytes').textContent = formatBytes(stats.total_bytes || 0);
+            document.getElementById('totalPackets').textContent = (stats.total_packets || 0).toLocaleString();
+        }
+        
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+        
+        function toggleAutoRefresh() {
+            const btn = document.getElementById('refreshBtn');
+            if (autoRefreshEnabled) {
+                autoRefreshEnabled = false;
+                clearInterval(refreshInterval);
+                btn.innerHTML = '▶️ Reprendre Auto-refresh';
+                btn.className = 'btn btn-success btn-sm';
+            } else {
+                autoRefreshEnabled = true;
+                startAutoRefresh();
+                btn.innerHTML = '⏸️ Pause Auto-refresh';
+                btn.className = 'btn btn-secondary btn-sm';
+            }
+        }
+        
+        function clearNatTable() {
+            if (confirm('Êtes-vous sûr de vouloir vider la table NAT ?')) {
+                fetch('/clear_nat_table', { method: 'POST' })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            updateNatTable();
+                            alert('Table NAT vidée avec succès');
+                        } else {
+                            alert('Erreur lors du vidage de la table NAT');
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Erreur:', error);
+                        alert('Erreur de connexion');
+                    });
+            }
+        }
+        
+        function startAutoRefresh() {
+            // Première mise à jour immédiate
+            updateNatTable();
+            
+            // Puis mise à jour toutes les 3 secondes
+            refreshInterval = setInterval(updateNatTable, 3000);
+        }
+        
+        // Démarrer l'auto-refresh au chargement de la page
+        document.addEventListener('DOMContentLoaded', function() {
+            startAutoRefresh();
+            
+            // Mettre à jour immédiatement les statistiques avec des valeurs par défaut
+            updateStats({
+                active_connections: 0,
+                total_bytes: 0,
+                total_packets: 0
+            });
+        });
+        
+        // Arrêter l'auto-refresh quand la page est cachée
+        document.addEventListener('visibilitychange', function() {
+            if (document.hidden) {
+                if (refreshInterval) {
+                    clearInterval(refreshInterval);
+                }
+            } else if (autoRefreshEnabled) {
+                startAutoRefresh();
+            }
+        });
+    </script>
+</body>
+</html>
