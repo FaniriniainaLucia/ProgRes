@@ -8,6 +8,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from flask import Flask, render_template, request, redirect, jsonify
 import json
+from dataclasses import asdict
 
 from network_utils import list_interfaces, get_iface_ip
 from core.nat_engine import (
@@ -16,9 +17,13 @@ from core.nat_engine import (
     reset_protocol_config, get_arp_table, clear_nat_tables
 )
 from core.logger import get_logger
+from core.nat_config import NATConfigManager, validate_interface_name, validate_protocol_list
 
 app = Flask(__name__)
 logger = get_logger("WebApp")
+
+# Gestionnaire de configuration
+config_manager = NATConfigManager("web/nat_config.json")
 
 # Configuration globale
 running_config = {
@@ -35,11 +40,15 @@ def index():
     if request.method == "POST":
         return handle_nat_start()
     
+    # Charger la dernière configuration sauvegardée
+    saved_config = config_manager.get_config()
+    
     return render_template("index.html", 
                          interfaces=list_interfaces(), 
                          config=running_config,
                          protocol_config=get_protocol_config(),
-                         enabled_protocols=get_enabled_protocols())
+                         enabled_protocols=get_enabled_protocols(),
+                         saved_config=saved_config)
 
 def handle_nat_start():
     """Gère le démarrage du NAT depuis le formulaire."""
@@ -49,8 +58,25 @@ def handle_nat_start():
     # Récupérer les interfaces
     lan = request.form.get("lan")
     wan = request.form.get("wan")
+    
+    # Validation des interfaces
+    if not validate_interface_name(lan) or not validate_interface_name(wan):
+        return render_template("index.html", 
+                             interfaces=list_interfaces(), 
+                             config=running_config,
+                             protocol_config=get_protocol_config(),
+                             enabled_protocols=get_enabled_protocols(),
+                             error="Noms d'interfaces invalides")
+    
+    if lan == wan:
+        return render_template("index.html", 
+                             interfaces=list_interfaces(), 
+                             config=running_config,
+                             protocol_config=get_protocol_config(),
+                             enabled_protocols=get_enabled_protocols(),
+                             error="Les interfaces LAN et WAN ne peuvent pas être identiques")
+    
     wan_ip = get_iface_ip(wan)
-
     if not wan_ip:
         logger.error(f"Interface WAN {wan} sans adresse IP")
         return render_template("index.html", 
@@ -63,13 +89,19 @@ def handle_nat_start():
     # Récupérer les protocoles sélectionnés
     selected_protocols = request.form.getlist("protocols")
     
-    if not selected_protocols:
+    # Validation des protocoles
+    valid, error_msg = validate_protocol_list(selected_protocols)
+    if not valid:
         return render_template("index.html", 
                              interfaces=list_interfaces(), 
                              config=running_config,
                              protocol_config=get_protocol_config(),
                              enabled_protocols=get_enabled_protocols(),
-                             error="Veuillez sélectionner au moins un protocole à supporter")
+                             error=error_msg)
+
+    # Sauvegarder la configuration
+    config_manager.update_interfaces(lan, wan)
+    config_manager.update_protocols(selected_protocols)
 
     # Configurer les protocoles
     reset_protocol_config()  # Désactiver tous les protocoles
@@ -281,6 +313,28 @@ def stats_json():
             "status": "error",
             "stats": {},
             "message": str(e)
+        })
+
+@app.route("/load_preset/<preset_name>")
+def load_preset(preset_name):
+    """Charge une configuration prédéfinie."""
+    from core.nat_config import get_preset_config
+    
+    preset_config = get_preset_config(preset_name)
+    if preset_config:
+        # Mettre à jour le gestionnaire de configuration
+        config_manager.config = preset_config
+        config_manager.save_config()
+        
+        return jsonify({
+            "status": "success",
+            "message": f"Configuration '{preset_name}' chargée",
+            "config": asdict(preset_config)
+        })
+    else:
+        return jsonify({
+            "status": "error",
+            "message": f"Configuration prédéfinie '{preset_name}' non trouvée"
         })
 
 def check_root_permissions():

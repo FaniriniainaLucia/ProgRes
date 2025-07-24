@@ -149,40 +149,24 @@ def get_system_arp_entry(ip):
         return None
 
 def get_gateway_info(wan_iface):
-    """Obtient les informations de la passerelle par défaut."""
+    """Obtient les informations de la passerelle par défaut (IP + MAC)."""
     try:
-        # Utiliser psutil pour obtenir les stats réseau
-        gateways = psutil.net_if_stats()
+        import netifaces
         
-        # Méthode cross-platform pour obtenir la passerelle
-        import socket
-        import struct
+        gws = netifaces.gateways()
+        if 'default' in gws and netifaces.AF_INET in gws['default']:
+            gateway_ip, iface = gws['default'][netifaces.AF_INET]
+            if iface == wan_iface:
+                mac = resolve_mac_address(gateway_ip, wan_iface)
+                if mac and mac != "ff:ff:ff:ff:ff:ff":
+                    logger.info(f"Passerelle détectée: {gateway_ip} -> {mac}")
+                    return gateway_ip, mac
+                else:
+                    logger.warning(f"MAC non résolue pour {gateway_ip}, fallback sur MAC interface WAN")
+            else:
+                logger.warning(f"La passerelle par défaut {gateway_ip} ne passe pas par {wan_iface}")
         
-        # Créer un socket pour déterminer la route par défaut
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            try:
-                # Se connecter à une adresse externe pour déterminer la route
-                s.connect(('8.8.8.8', 80))
-                local_ip = s.getsockname()[0]
-                
-                # Obtenir l'adresse de la passerelle
-                # Sur la plupart des réseaux, c'est généralement .1 ou .254
-                ip_parts = local_ip.split('.')
-                gateway_candidates = [
-                    f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.1",
-                    f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.254"
-                ]
-                
-                for gateway_ip in gateway_candidates:
-                    mac = resolve_mac_address(gateway_ip, wan_iface)
-                    if mac and mac != "ff:ff:ff:ff:ff:ff":
-                        logger.info(f"Passerelle détectée: {gateway_ip} -> {mac}")
-                        return gateway_ip, mac
-                        
-            except:
-                pass
-        
-        # Fallback: utiliser la MAC de l'interface WAN
+        # Fallback : utiliser MAC de l'interface
         try:
             wan_mac = get_if_hwaddr(wan_iface)
             logger.warning("Utilisation de la MAC de l'interface WAN comme fallback")
@@ -193,6 +177,7 @@ def get_gateway_info(wan_iface):
     except Exception as e:
         logger.error(f"Erreur obtention passerelle: {e}")
         return None, "ff:ff:ff:ff:ff:ff"
+
 
 def check_interface_status(iface):
     """Vérifie si l'interface est active et configurée."""

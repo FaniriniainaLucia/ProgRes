@@ -1,0 +1,12 @@
+{
+    "lan_interface": "wlp0s20f3",
+    "wan_interface": "enx922a0cd542df",
+    "enabled_protocols": [
+        "ICMP"
+    ],
+    "port_range_start": 1024,
+    "port_range_end": 65535,
+    "arp_timeout": 300,
+    "nat_timeout": 3600,
+    "log_level": "INFO"
+}
