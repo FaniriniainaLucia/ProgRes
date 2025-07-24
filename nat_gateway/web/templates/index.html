@@ -3,8 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NAT Gateway Manager</title>
+    <title>NAT Gateway Manager v2.0</title>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
         .status-active { color: #28a745; }
         .status-inactive { color: #dc3545; }
@@ -15,9 +16,11 @@
             right: 10px; 
             background: rgba(0,123,255,0.8); 
             color: white; 
-            padding: 5px 10px; 
-            border-radius: 5px; 
+            padding: 8px 15px; 
+            border-radius: 25px; 
             display: none;
+            z-index: 1000;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
         }
         .connection-row:hover {
             background-color: #f8f9fa;
@@ -28,109 +31,318 @@
         .stats-card {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
+            border-radius: 15px;
+        }
+        .arp-card {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            border-radius: 15px;
+        }
+        .protocol-card {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+            border-radius: 15px;
+        }
+        .card {
+            border-radius: 15px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+        }
+        .protocol-switch {
+            margin: 5px 0;
+        }
+        .protocol-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 12px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 8px;
+            margin-bottom: 8px;
+        }
+        .nav-tabs .nav-link {
+            border-radius: 10px 10px 0 0;
+        }
+        .nav-tabs .nav-link.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-color: transparent;
+        }
+        .btn-gradient {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            color: white;
+        }
+        .btn-gradient:hover {
+            background: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
+            color: white;
         }
     </style>
 </head>
 <body>
-    <div class="container mt-4">
-        <h1 class="mb-4">🌐 NAT Gateway Manager</h1>
+    <div class="container-fluid mt-4">
+        <div class="row mb-4">
+            <div class="col-12">
+                <h1 class="mb-0">
+                    <i class="fas fa-network-wired text-primary"></i>
+                    NAT Gateway Manager v2.0
+                </h1>
+                <p class="text-muted">Gestionnaire NAT avancé avec support multi-protocoles</p>
+            </div>
+        </div>
         
         <div class="update-indicator" id="updateIndicator">
-            Mise à jour...
+            <i class="fas fa-sync-alt fa-spin"></i> Mise à jour...
         </div>
         
         {% if error %}
-        <div class="alert alert-danger">{{ error }}</div>
+        <div class="alert alert-danger alert-dismissible fade show">
+            <i class="fas fa-exclamation-triangle"></i> {{ error }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
         {% endif %}
         
         <div class="row">
-            <div class="col-md-6">
-                <div class="card">
+            <!-- Configuration Panel -->
+            <div class="col-lg-4">
+                <div class="card mb-4">
                     <div class="card-header">
-                        <h5>Configuration NAT</h5>
+                        <h5><i class="fas fa-cog"></i> Configuration NAT</h5>
                     </div>
                     <div class="card-body">
                         {% if not config.status %}
                         <form method="POST">
                             <div class="mb-3">
-                                <label for="lan" class="form-label">Interface LAN:</label>
+                                <label for="lan" class="form-label">
+                                    <i class="fas fa-home"></i> Interface LAN:
+                                </label>
                                 <select name="lan" id="lan" class="form-select" required>
                                     <option value="">Sélectionner...</option>
                                     {% for iface in interfaces %}
-                                    <option value="{{ iface.name }}">{{ iface.name }} ({{ iface.ip }})</option>
+                                    <option value="{{ iface.name }}">{{ iface.name }} ({{ iface.ip or 'No IP' }})</option>
                                     {% endfor %}
                                 </select>
                             </div>
                             
                             <div class="mb-3">
-                                <label for="wan" class="form-label">Interface WAN:</label>
+                                <label for="wan" class="form-label">
+                                    <i class="fas fa-globe"></i> Interface WAN:
+                                </label>
                                 <select name="wan" id="wan" class="form-select" required>
                                     <option value="">Sélectionner...</option>
                                     {% for iface in interfaces %}
-                                    <option value="{{ iface.name }}">{{ iface.name }} ({{ iface.ip }})</option>
+                                    <option value="{{ iface.name }}">{{ iface.name }} ({{ iface.ip or 'No IP' }})</option>
                                     {% endfor %}
                                 </select>
                             </div>
                             
-                            <button type="submit" class="btn btn-primary">🚀 Démarrer NAT</button>
+                            <div class="mb-3">
+                                <label class="form-label">
+                                    <i class="fas fa-filter"></i> Protocoles supportés:
+                                </label>
+                                <div class="border rounded p-3">
+                                    {% for proto, config in protocol_config.items() %}
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" name="protocols" value="{{ proto }}" id="proto_{{ proto }}">
+                                        <label class="form-check-label" for="proto_{{ proto }}">
+                                            {{ proto }}
+                                            {% if proto == 'TCP' %}
+                                                <small class="text-muted">(Transmission Control Protocol)</small>
+                                            {% elif proto == 'UDP' %}
+                                                <small class="text-muted">(User Datagram Protocol)</small>
+                                            {% elif proto == 'ICMP' %}
+                                                <small class="text-muted">(Internet Control Message Protocol)</small>
+                                            {% elif proto == 'ALL' %}
+                                                <small class="text-muted">(Tous les protocoles IP)</small>
+                                            {% endif %}
+                                        </label>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                                <small class="form-text text-muted">Sélectionnez les protocoles que le NAT doit traiter</small>
+                            </div>
+                            
+                            <button type="submit" class="btn btn-gradient w-100">
+                                <i class="fas fa-rocket"></i> Démarrer NAT
+                            </button>
                         </form>
                         {% else %}
                         <div class="alert alert-success">
-                            <h6 class="status-active">✅ NAT Actif</h6>
+                            <h6 class="status-active">
+                                <i class="fas fa-check-circle"></i> NAT Actif
+                            </h6>
                             <p><strong>LAN:</strong> {{ config.lan }}</p>
                             <p><strong>WAN:</strong> {{ config.wan }} ({{ config.wan_ip }})</p>
+                            <p><strong>Protocoles:</strong> 
+                                {% for proto in config.enabled_protocols %}
+                                    <span class="badge bg-primary">{{ proto }}</span>
+                                {% endfor %}
+                            </p>
                         </div>
-                        <a href="/stop" class="btn btn-danger">🛑 Arrêter NAT</a>
+                        <a href="/stop" class="btn btn-danger w-100">
+                            <i class="fas fa-stop"></i> Arrêter NAT
+                        </a>
                         {% endif %}
                     </div>
                 </div>
                 
-                <div class="card mt-3">
+                <!-- Protocol Control Panel (only show when NAT is running) -->
+                {% if config.status %}
+                <div class="card protocol-card mb-4">
                     <div class="card-header">
-                        <h6>Actions</h6>
+                        <h6 class="mb-0">
+                            <i class="fas fa-sliders-h"></i> Contrôle Protocoles
+                        </h6>
                     </div>
                     <div class="card-body">
-                        <button onclick="toggleAutoRefresh()" class="btn btn-secondary btn-sm" id="refreshBtn">
-                            ⏸️ Pause Auto-refresh
+                        <div id="protocolControls">
+                            {% for proto, proto_config in protocol_config.items() %}
+                            <div class="protocol-item">
+                                <span>{{ proto }}</span>
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input protocol-switch" 
+                                           type="checkbox" 
+                                           id="switch_{{ proto }}"
+                                           data-protocol="{{ proto }}"
+                                           {% if proto in enabled_protocols %}checked{% endif %}>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+                
+                <div class="card">
+                    <div class="card-header">
+                        <h6><i class="fas fa-tools"></i> Actions</h6>
+                    </div>
+                    <div class="card-body">
+                        <button onclick="toggleAutoRefresh()" class="btn btn-secondary btn-sm mb-2 w-100" id="refreshBtn">
+                            <i class="fas fa-pause"></i> Pause Auto-refresh
                         </button>
-                        <button onclick="clearNatTable()" class="btn btn-warning btn-sm">🗑️ Vider Table</button>
+                        <button onclick="clearNatTable()" class="btn btn-warning btn-sm w-100">
+                            <i class="fas fa-trash"></i> Vider Table NAT
+                        </button>
                     </div>
                 </div>
             </div>
             
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5>Table NAT</h5>
-                        <small class="text-muted" id="lastUpdate">Dernière mise à jour: --</small>
-                    </div>
-                    <div class="card-body">
-                        <div class="table-container" id="natTableContainer">
-                            <div class="text-center text-muted">
-                                Chargement de la table NAT...
+            <!-- Data Display Panel -->
+            <div class="col-lg-8">
+                <!-- Tabs for different tables -->
+                <ul class="nav nav-tabs" role="tablist">
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link active" id="nat-tab" data-bs-toggle="tab" data-bs-target="#nat-panel" type="button" role="tab">
+                            <i class="fas fa-exchange-alt"></i> Table NAT
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="arp-tab" data-bs-toggle="tab" data-bs-target="#arp-panel" type="button" role="tab">
+                            <i class="fas fa-map-marker-alt"></i> Table ARP
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="stats-tab" data-bs-toggle="tab" data-bs-target="#stats-panel" type="button" role="tab">
+                            <i class="fas fa-chart-bar"></i> Statistiques
+                        </button>
+                    </li>
+                </ul>
+                
+                <div class="tab-content">
+                    <!-- NAT Table Tab -->
+                    <div class="tab-pane fade show active" id="nat-panel" role="tabpanel">
+                        <div class="card">
+                            <div class="card-header d-flex justify-content-between align-items-center">
+                                <h5>Table NAT</h5>
+                                <small class="text-muted" id="lastUpdate">Dernière mise à jour: --</small>
+                            </div>
+                            <div class="card-body">
+                                <div class="table-container" id="natTableContainer">
+                                    <div class="text-center text-muted">
+                                        <i class="fas fa-spinner fa-spin"></i>
+                                        Chargement de la table NAT...
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
-                </div>
-                
-                <!-- Statistiques -->
-                <div class="card mt-3 stats-card">
-                    <div class="card-header">
-                        <h6 class="mb-0">📊 Statistiques en temps réel</h6>
+                    
+                    <!-- ARP Table Tab -->
+                    <div class="tab-pane fade" id="arp-panel" role="tabpanel">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5><i class="fas fa-map-marker-alt"></i> Table ARP</h5>
+                            </div>
+                            <div class="card-body">
+                                <div class="table-container" id="arpTableContainer">
+                                    <div class="text-center text-muted">
+                                        <i class="fas fa-spinner fa-spin"></i>
+                                        Chargement de la table ARP...
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
-                    <div class="card-body">
-                        <div class="row text-center">
-                            <div class="col-4">
-                                <h4 id="activeConnections">0</h4>
-                                <small>Connexions</small>
+                    
+                    <!-- Statistics Tab -->
+                    <div class="tab-pane fade" id="stats-panel" role="tabpanel">
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <div class="card stats-card">
+                                    <div class="card-header">
+                                        <h6 class="mb-0"><i class="fas fa-chart-line"></i> Statistiques Générales</h6>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="row text-center">
+                                            <div class="col-4">
+                                                <h4 id="activeConnections">0</h4>
+                                                <small>Connexions</small>
+                                            </div>
+                                            <div class="col-4">
+                                                <h4 id="totalBytes">0 B</h4>
+                                                <small>Données</small>
+                                            </div>
+                                            <div class="col-4">
+                                                <h4 id="totalPackets">0</h4>
+                                                <small>Paquets</small>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
-                            <div class="col-4">
-                                <h4 id="totalBytes">0 B</h4>
-                                <small>Données</small>
+                            <div class="col-md-6 mb-3">
+                                <div class="card arp-card">
+                                    <div class="card-header">
+                                        <h6 class="mb-0"><i class="fas fa-network-wired"></i> Informations Réseau</h6>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="row text-center">
+                                            <div class="col-4">
+                                                <h4 id="arpEntries">0</h4>
+                                                <small>Entrées ARP</small>
+                                            </div>
+                                            <div class="col-4">
+                                                <h4 id="usedPorts">0</h4>
+                                                <small>Ports Utilisés</small>
+                                            </div>
+                                            <div class="col-4">
+                                                <h4 id="uptime">0s</h4>
+                                                <small>Durée</small>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
-                            <div class="col-4">
-                                <h4 id="totalPackets">0</h4>
-                                <small>Paquets</small>
+                        </div>
+                        
+                        <div class="card">
+                            <div class="card-header">
+                                <h6><i class="fas fa-chart-pie"></i> Statistiques par Protocole</h6>
+                            </div>
+                            <div class="card-body">
+                                <div id="protocolStats">
+                                    <div class="text-center text-muted">Aucune statistique disponible</div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -151,78 +363,163 @@
             const container = document.getElementById('natTableContainer');
             const lastUpdate = document.getElementById('lastUpdate');
             
-            // Afficher l'indicateur de mise à jour
             indicator.style.display = 'block';
             
             fetch('/nat_table_json')
                 .then(response => response.json())
                 .then(data => {
                     if (data.status === 'success') {
-                        let html = `<p><small>Connexions actives: ${data.stats.active_connections}</small></p>`;
+                        let html = `<p><small><i class="fas fa-info-circle"></i> Connexions actives: ${data.stats.active_connections}</small></p>`;
                         
                         if (data.connections && data.connections.length > 0) {
                             html += `
                                 <table class="table table-sm table-hover">
                                     <thead class="table-dark">
                                         <tr>
-                                            <th>Protocole</th>
-                                            <th>Source</th>
-                                            <th>Destination</th>
-                                            <th>État</th>
-                                            <th>Durée</th>
+                                            <th><i class="fas fa-tags"></i> Protocole</th>
+                                            <th><i class="fas fa-home"></i> Source LAN</th>
+                                            <th><i class="fas fa-globe"></i> Public WAN</th>
+                                            <th><i class="fas fa-info-circle"></i> État</th>
                                         </tr>
                                     </thead>
                                     <tbody>
                             `;
                             
                             data.connections.forEach(conn => {
-                                const protocolColor = conn.protocol === 'TCP' ? 'primary' : 'success';
-                                const stateColor = conn.state === 'ESTABLISHED' ? 'success' : 
-                                                 conn.state === 'TIME_WAIT' ? 'warning' : 'secondary';
+                                const protocolColor = conn.protocol === 'TCP' ? 'primary' : 
+                                                     conn.protocol === 'UDP' ? 'success' : 
+                                                     conn.protocol === 'ICMP' ? 'warning' : 'info';
                                 
                                 html += `
                                     <tr class="connection-row">
                                         <td><span class="badge bg-${protocolColor} protocol-badge">${conn.protocol}</span></td>
                                         <td>${conn.src_ip}:${conn.src_port}</td>
-                                        <td>${conn.dst_ip}:${conn.dst_port}</td>
-                                        <td><span class="badge bg-${stateColor}">${conn.state}</span></td>
-                                        <td>${conn.duration || 'N/A'}</td>
+                                        <td>${conn.wan_ip}:${conn.public_port}</td>
+                                        <td><span class="badge bg-success">${conn.state}</span></td>
                                     </tr>
                                 `;
                             });
                             
                             html += '</tbody></table>';
                         } else {
-                            html += '<div class="text-center text-muted">Aucune connexion active</div>';
+                            html += '<div class="text-center text-muted"><i class="fas fa-info-circle"></i> Aucune connexion active</div>';
                         }
                         
                         container.innerHTML = html;
-                        
-                        // Mettre à jour les statistiques
-                        updateStats(data.stats);
-                        
-                        // Mettre à jour l'heure de dernière mise à jour
+                        updateGeneralStats(data.stats);
                         lastUpdate.textContent = `Dernière mise à jour: ${new Date().toLocaleTimeString()}`;
                     } else {
-                        container.innerHTML = `<div class="alert alert-warning">${data.message || 'Erreur lors du chargement'}</div>`;
+                        container.innerHTML = `<div class="alert alert-warning"><i class="fas fa-exclamation-triangle"></i> ${data.message || 'Erreur lors du chargement'}</div>`;
                     }
                 })
                 .catch(error => {
                     console.error('Erreur:', error);
-                    container.innerHTML = '<div class="alert alert-danger">Erreur de connexion</div>';
+                    container.innerHTML = '<div class="alert alert-danger"><i class="fas fa-times-circle"></i> Erreur de connexion</div>';
                 })
                 .finally(() => {
-                    // Masquer l'indicateur de mise à jour
                     setTimeout(() => {
                         indicator.style.display = 'none';
                     }, 300);
                 });
         }
         
-        function updateStats(stats) {
+        function updateArpTable() {
+            if (!autoRefreshEnabled) return;
+            
+            const container = document.getElementById('arpTableContainer');
+            
+            fetch('/arp_table_json')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        let html = `<p><small><i class="fas fa-info-circle"></i> Entrées ARP: ${data.total_entries}</small></p>`;
+                        
+                        if (data.arp_entries && data.arp_entries.length > 0) {
+                            html += `
+                                <table class="table table-sm table-hover">
+                                    <thead class="table-dark">
+                                        <tr>
+                                            <th><i class="fas fa-globe"></i> Adresse IP</th>
+                                            <th><i class="fas fa-ethernet"></i> Adresse MAC</th>
+                                            <th><i class="fas fa-network-wired"></i> Interface</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                            `;
+                            
+                            data.arp_entries.forEach(entry => {
+                                html += `
+                                    <tr>
+                                        <td>${entry.ip}</td>
+                                        <td><code>${entry.mac}</code></td>
+                                        <td><span class="badge bg-secondary">${entry.interface}</span></td>
+                                    </tr>
+                                `;
+                            });
+                            
+                            html += '</tbody></table>';
+                        } else {
+                            html += '<div class="text-center text-muted"><i class="fas fa-info-circle"></i> Aucune entrée ARP</div>';
+                        }
+                        
+                        container.innerHTML = html;
+                        document.getElementById('arpEntries').textContent = data.total_entries;
+                    } else {
+                        container.innerHTML = `<div class="alert alert-warning"><i class="fas fa-exclamation-triangle"></i> Erreur chargement ARP</div>`;
+                    }
+                })
+                .catch(error => {
+                    console.error('Erreur ARP:', error);
+                    container.innerHTML = '<div class="alert alert-danger"><i class="fas fa-times-circle"></i> Erreur de connexion</div>';
+                });
+        }
+        
+        function updateGeneralStats(stats) {
             document.getElementById('activeConnections').textContent = stats.active_connections || 0;
             document.getElementById('totalBytes').textContent = formatBytes(stats.total_bytes || 0);
             document.getElementById('totalPackets').textContent = (stats.total_packets || 0).toLocaleString();
+            document.getElementById('usedPorts').textContent = stats.used_ports || 0;
+            document.getElementById('uptime').textContent = formatUptime(stats.uptime_seconds || 0);
+            
+            // Mettre à jour les statistiques par protocole
+            updateProtocolStats(stats.protocols_stats || {}, stats.bytes_by_protocol || {});
+        }
+        
+        function updateProtocolStats(protocolStats, bytesStats) {
+            const container = document.getElementById('protocolStats');
+            
+            if (Object.keys(protocolStats).length === 0) {
+                container.innerHTML = '<div class="text-center text-muted">Aucune statistique disponible</div>';
+                return;
+            }
+            
+            let html = '<div class="row">';
+            
+            for (const [protocol, packets] of Object.entries(protocolStats)) {
+                const bytes = bytesStats[protocol] || 0;
+                const color = protocol === 'TCP' ? 'primary' : 
+                             protocol === 'UDP' ? 'success' : 
+                             protocol === 'ICMP' ? 'warning' : 'info';
+                
+                html += `
+                    <div class="col-md-4 mb-3">
+                        <div class="card border-${color}">
+                            <div class="card-header bg-${color} text-white">
+                                <h6 class="mb-0">${protocol}</h6>
+                            </div>
+                            <div class="card-body text-center">
+                                <h5>${packets.toLocaleString()}</h5>
+                                <small class="text-muted">paquets</small><br>
+                                <h6>${formatBytes(bytes)}</h6>
+                                <small class="text-muted">données</small>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+            
+            html += '</div>';
+            container.innerHTML = html;
         }
         
         function formatBytes(bytes) {
@@ -233,18 +530,25 @@
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
         }
         
+        function formatUptime(seconds) {
+            if (seconds < 60) return seconds + 's';
+            if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
+            if (seconds < 86400) return Math.floor(seconds / 3600) + 'h';
+            return Math.floor(seconds / 86400) + 'd';
+        }
+        
         function toggleAutoRefresh() {
             const btn = document.getElementById('refreshBtn');
             if (autoRefreshEnabled) {
                 autoRefreshEnabled = false;
                 clearInterval(refreshInterval);
-                btn.innerHTML = '▶️ Reprendre Auto-refresh';
-                btn.className = 'btn btn-success btn-sm';
+                btn.innerHTML = '<i class="fas fa-play"></i> Reprendre Auto-refresh';
+                btn.className = 'btn btn-success btn-sm mb-2 w-100';
             } else {
                 autoRefreshEnabled = true;
                 startAutoRefresh();
-                btn.innerHTML = '⏸️ Pause Auto-refresh';
-                btn.className = 'btn btn-secondary btn-sm';
+                btn.innerHTML = '<i class="fas fa-pause"></i> Pause Auto-refresh';
+                btn.className = 'btn btn-secondary btn-sm mb-2 w-100';
             }
         }
         
@@ -255,39 +559,112 @@
                     .then(data => {
                         if (data.status === 'success') {
                             updateNatTable();
-                            alert('Table NAT vidée avec succès');
+                            showAlert('Table NAT vidée avec succès', 'success');
                         } else {
-                            alert('Erreur lors du vidage de la table NAT');
+                            showAlert('Erreur lors du vidage de la table NAT', 'danger');
                         }
                     })
                     .catch(error => {
                         console.error('Erreur:', error);
-                        alert('Erreur de connexion');
+                        showAlert('Erreur de connexion', 'danger');
                     });
             }
         }
         
-        function startAutoRefresh() {
-            // Première mise à jour immédiate
-            updateNatTable();
+        function showAlert(message, type) {
+            const alertDiv = document.createElement('div');
+            alertDiv.className = `alert alert-${type} alert-dismissible fade show`;
+            alertDiv.innerHTML = `
+                <i class="fas fa-${type === 'success' ? 'check-circle' : 'exclamation-triangle'}"></i>
+                ${message}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            `;
             
-            // Puis mise à jour toutes les 3 secondes
-            refreshInterval = setInterval(updateNatTable, 3000);
+            const container = document.querySelector('.container-fluid');
+            container.insertBefore(alertDiv, container.children[1]);
+            
+            // Auto-dismiss after 5 seconds
+            setTimeout(() => {
+                if (alertDiv.parentNode) {
+                    alertDiv.remove();
+                }
+            }, 5000);
         }
         
-        // Démarrer l'auto-refresh au chargement de la page
+        function startAutoRefresh() {
+            updateNatTable();
+            updateArpTable();
+            
+            refreshInterval = setInterval(() => {
+                updateNatTable();
+                updateArpTable();
+            }, 3000);
+        }
+        
+        // Protocol switch handlers
         document.addEventListener('DOMContentLoaded', function() {
+            // Setup protocol switches
+            const protocolSwitches = document.querySelectorAll('.protocol-switch');
+            protocolSwitches.forEach(switchEl => {
+                switchEl.addEventListener('change', function() {
+                    const protocol = this.dataset.protocol;
+                    const enabled = this.checked;
+                    
+                    fetch('/protocol_config', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            protocol: protocol,
+                            enabled: enabled
+                        })
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            showAlert(data.message, 'success');
+                        } else {
+                            showAlert(data.message, 'danger');
+                            // Revert switch state on error
+                            this.checked = !enabled;
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Erreur:', error);
+                        showAlert('Erreur de connexion', 'danger');
+                        // Revert switch state on error
+                        this.checked = !enabled;
+                    });
+                });
+            });
+            
+            // Start auto-refresh
             startAutoRefresh();
             
-            // Mettre à jour immédiatement les statistiques avec des valeurs par défaut
-            updateStats({
+            // Initialize stats with default values
+            updateGeneralStats({
                 active_connections: 0,
                 total_bytes: 0,
-                total_packets: 0
+                total_packets: 0,
+                used_ports: 0,
+                uptime_seconds: 0,
+                arp_cache_entries: 0
             });
         });
         
-        // Arrêter l'auto-refresh quand la page est cachée
+        // Handle tab switching to update content
+        document.addEventListener('shown.bs.tab', function(event) {
+            const target = event.target.getAttribute('data-bs-target');
+            
+            if (target === '#arp-panel') {
+                updateArpTable();
+            } else if (target === '#nat-panel') {
+                updateNatTable();
+            }
+        });
+        
+        // Pause auto-refresh when page is hidden
         document.addEventListener('visibilitychange', function() {
             if (document.hidden) {
                 if (refreshInterval) {
@@ -296,6 +673,60 @@
             } else if (autoRefreshEnabled) {
                 startAutoRefresh();
             }
+        });
+        
+        // Validate form before submission
+        document.querySelector('form')?.addEventListener('submit', function(e) {
+            const lan = document.getElementById('lan').value;
+            const wan = document.getElementById('wan').value;
+            const protocols = document.querySelectorAll('input[name="protocols"]:checked');
+            
+            if (lan === wan) {
+                e.preventDefault();
+                showAlert('Les interfaces LAN et WAN ne peuvent pas être identiques', 'danger');
+                return false;
+            }
+            
+            if (protocols.length === 0) {
+                e.preventDefault();
+                showAlert('Veuillez sélectionner au moins un protocole', 'danger');
+                return false;
+            }
+            
+            // Show loading state
+            const submitBtn = this.querySelector('button[type="submit"]');
+            const originalText = submitBtn.innerHTML;
+            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Démarrage...';
+            submitBtn.disabled = true;
+            
+            // Reset button after 10 seconds (fallback)
+            setTimeout(() => {
+                submitBtn.innerHTML = originalText;
+                submitBtn.disabled = false;
+            }, 10000);
+        });
+        
+        // Add keyboard shortcuts
+        document.addEventListener('keydown', function(e) {
+            // Ctrl+R or F5 - Manual refresh
+            if ((e.ctrlKey && e.key === 'r') || e.key === 'F5') {
+                e.preventDefault();
+                updateNatTable();
+                updateArpTable();
+                showAlert('Tables actualisées manuellement', 'info');
+            }
+            
+            // Ctrl+P - Toggle auto-refresh
+            if (e.ctrlKey && e.key === 'p') {
+                e.preventDefault();
+                toggleAutoRefresh();
+            }
+        });
+        
+        // Add tooltips for better UX
+        const tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+        const tooltipList = tooltipTriggerList.map(function(tooltipTriggerEl) {
+            return new bootstrap.Tooltip(tooltipTriggerEl);
         });
     </script>
 </body>
