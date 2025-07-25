@@ -1,8 +1,8 @@
 {
     "lan_interface": "wlp0s20f3",
-    "wan_interface": "enx922a0cd542df",
+    "wan_interface": "enxaec71492bd4f",
     "enabled_protocols": [
-        "ICMP"
+        "ALL"
     ],
     "port_range_start": 1024,
     "port_range_end": 65535,

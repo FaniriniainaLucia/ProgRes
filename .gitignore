@@ -1,5 +1,6 @@
 # Ignore l'environnement virtuel
 venv/
+web/nat_config.json
 
 # Fichiers Python compilés
 __pycache__/
