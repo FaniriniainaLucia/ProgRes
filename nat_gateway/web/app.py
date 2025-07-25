@@ -8,6 +8,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from flask import Flask, render_template, request, redirect, jsonify
 import json
+from core.packet_capture import packet_capture
 from dataclasses import asdict
 
 from network_utils import list_interfaces, get_iface_ip
@@ -33,6 +34,277 @@ running_config = {
     "status": False,
     "enabled_protocols": []
 }
+
+@app.route("/capture")
+def capture_interface():
+    """Interface de capture de paquets style Wireshark."""
+    return render_template("capture.html")
+
+@app.route("/capture/start", methods=["POST"])
+def start_capture():
+    """Démarre la capture de paquets."""
+    try:
+        if not running_config["status"]:
+            return jsonify({
+                "status": "error",
+                "message": "NAT non démarré. Impossible de capturer des paquets."
+            })
+        
+        packet_capture.start_capture()
+        logger.info("Capture de paquets démarrée via interface web")
+        
+        return jsonify({
+            "status": "success",
+            "message": "Capture démarrée avec succès"
+        })
+    
+    except Exception as e:
+        logger.error(f"Erreur démarrage capture: {e}")
+        return jsonify({
+            "status": "error",
+            "message": f"Erreur lors du démarrage: {str(e)}"
+        })
+
+@app.route("/capture/stop", methods=["POST"])
+def stop_capture():
+    """Arrête la capture de paquets."""
+    try:
+        packet_capture.stop_capture()
+        logger.info("Capture de paquets arrêtée via interface web")
+        
+        return jsonify({
+            "status": "success",
+            "message": "Capture arrêtée avec succès"
+        })
+    
+    except Exception as e:
+        logger.error(f"Erreur arrêt capture: {e}")
+        return jsonify({
+            "status": "error",
+            "message": f"Erreur lors de l'arrêt: {str(e)}"
+        })
+
+@app.route("/capture/clear", methods=["POST"])
+def clear_capture():
+    """Vide la liste des paquets capturés."""
+    try:
+        packet_capture.clear_packets()
+        logger.info("Paquets capturés vidés via interface web")
+        
+        return jsonify({
+            "status": "success",
+            "message": "Paquets vidés avec succès"
+        })
+    
+    except Exception as e:
+        logger.error(f"Erreur vidage capture: {e}")
+        return jsonify({
+            "status": "error",
+            "message": f"Erreur lors du vidage: {str(e)}"
+        })
+
+@app.route("/capture/packets")
+def get_packets():
+    """Récupère la liste des paquets capturés."""
+    try:
+        start = int(request.args.get('start', 0))
+        count = int(request.args.get('count', 100))
+        
+        packets = packet_capture.get_packets(start, count)
+        statistics = packet_capture.get_statistics()
+        
+        # Convertir les paquets en dictionnaires pour JSON
+        packets_data = []
+        for packet in packets:
+            packet_dict = {
+                'timestamp': packet.timestamp,
+                'frame_number': packet.frame_number,
+                'src_ip': packet.src_ip,
+                'dst_ip': packet.dst_ip,
+                'protocol': packet.protocol,
+                'length': packet.length,
+                'src_port': packet.src_port,
+                'dst_port': packet.dst_port,
+                'flags': packet.flags,
+                'ttl': packet.ttl,
+                'id': packet.id,
+                'checksum': packet.checksum,
+                'payload_size': packet.payload_size,
+                'raw_data': packet.raw_data,
+                'detailed_info': packet.detailed_info,
+                'interface': packet.interface,
+                'direction': packet.direction
+            }
+            packets_data.append(packet_dict)
+        
+        return jsonify({
+            "status": "success",
+            "packets": packets_data,
+            "statistics": statistics,
+            "total_packets": len(packets_data)
+        })
+    
+    except Exception as e:
+        logger.error(f"Erreur récupération paquets: {e}")
+        return jsonify({
+            "status": "error",
+            "packets": [],
+            "statistics": {},
+            "message": f"Erreur: {str(e)}"
+        })
+
+@app.route("/capture/packet/<int:frame_number>")
+def get_packet_details(frame_number):
+    """Récupère les détails d'un paquet spécifique."""
+    try:
+        packet = packet_capture.get_packet_by_frame(frame_number)
+        
+        if packet:
+            packet_dict = {
+                'timestamp': packet.timestamp,
+                'frame_number': packet.frame_number,
+                'src_ip': packet.src_ip,
+                'dst_ip': packet.dst_ip,
+                'protocol': packet.protocol,
+                'length': packet.length,
+                'src_port': packet.src_port,
+                'dst_port': packet.dst_port,
+                'flags': packet.flags,
+                'ttl': packet.ttl,
+                'id': packet.id,
+                'checksum': packet.checksum,
+                'payload_size': packet.payload_size,
+                'raw_data': packet.raw_data,
+                'detailed_info': packet.detailed_info,
+                'interface': packet.interface,
+                'direction': packet.direction
+            }
+            
+            return jsonify({
+                "status": "success",
+                "packet": packet_dict
+            })
+        else:
+            return jsonify({
+                "status": "error",
+                "message": f"Paquet {frame_number} non trouvé"
+            })
+    
+    except Exception as e:
+        logger.error(f"Erreur récupération paquet {frame_number}: {e}")
+        return jsonify({
+            "status": "error",
+            "message": f"Erreur: {str(e)}"
+        })
+
+@app.route("/capture/filters", methods=["POST"])
+def set_capture_filters():
+    """Configure les filtres de capture."""
+    try:
+        filters = request.get_json()
+        
+        # Valider les filtres
+        valid_filters = {}
+        if 'protocol' in filters:
+            protocols = filters['protocol']
+            if isinstance(protocols, str):
+                protocols = [protocols] if protocols else []
+            valid_filters['protocol'] = protocols
+        
+        if 'src_ip' in filters:
+            valid_filters['src_ip'] = filters['src_ip']
+        
+        if 'dst_ip' in filters:
+            valid_filters['dst_ip'] = filters['dst_ip']
+        
+        if 'port' in filters:
+            valid_filters['port'] = filters['port']
+        
+        if 'interface' in filters:
+            valid_filters['interface'] = filters['interface']
+        
+        packet_capture.set_filters(**valid_filters)
+        
+        return jsonify({
+            "status": "success",
+            "message": "Filtres appliqués avec succès",
+            "filters": valid_filters
+        })
+    
+    except Exception as e:
+        logger.error(f"Erreur configuration filtres: {e}")
+        return jsonify({
+            "status": "error",
+            "message": f"Erreur: {str(e)}"
+        })
+
+@app.route("/capture/export")
+def export_capture():
+    """Exporte les paquets capturés."""
+    try:
+        format_type = request.args.get('format', 'json').lower()
+        
+        if format_type not in ['json', 'csv']:
+            return jsonify({
+                "status": "error",
+                "message": "Format non supporté. Utilisez 'json' ou 'csv'."
+            })
+        
+        # Créer un fichier temporaire
+        with tempfile.NamedTemporaryFile(mode='w', suffix=f'.{format_type}', delete=False) as temp_file:
+            temp_filename = temp_file.name
+            
+            # Exporter vers le fichier temporaire
+            packet_capture.export_packets(temp_filename, format_type)
+            
+            # Lire le contenu du fichier
+            with open(temp_filename, 'r') as f:
+                content = f.read()
+            
+            # Supprimer le fichier temporaire
+            os.unlink(temp_filename)
+            
+            # Déterminer le type MIME
+            mime_type = 'application/json' if format_type == 'json' else 'text/csv'
+            
+            # Créer la réponse avec le bon en-tête
+            from flask import Response
+            response = Response(
+                content,
+                mimetype=mime_type,
+                headers={
+                    "Content-Disposition": f"attachment; filename=capture_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{format_type}"
+                }
+            )
+            
+            return response
+    
+    except Exception as e:
+        logger.error(f"Erreur export capture: {e}")
+        return jsonify({
+            "status": "error",
+            "message": f"Erreur lors de l'export: {str(e)}"
+        })
+
+@app.route("/capture/status")
+def capture_status():
+    """Retourne le statut de la capture."""
+    try:
+        statistics = packet_capture.get_statistics()
+        
+        return jsonify({
+            "status": "success",
+            "capture_active": statistics.get('capture_active', False),
+            "packets_count": statistics.get('packets_in_buffer', 0),
+            "statistics": statistics
+        })
+    
+    except Exception as e:
+        logger.error(f"Erreur statut capture: {e}")
+        return jsonify({
+            "status": "error",
+            "message": f"Erreur: {str(e)}"
+        })
 
 @app.route("/", methods=["GET", "POST"])
 def index():
