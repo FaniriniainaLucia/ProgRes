@@ -1,4 +1,4 @@
-# nat_engine_v2.py - Version refactorisée avec ARP et filtres protocoles
+# nat_engine_v2.py - Version corrigée avec sendp() optimisé pour HTTPS
 
 from scapy.all import (
     sniff, sendp, IP, TCP, UDP, ICMP, Ether, get_if_hwaddr, get_if_addr,
@@ -35,7 +35,8 @@ nat_stats = {
     'total_bytes': 0,
     'packets_by_protocol': defaultdict(int),
     'bytes_by_protocol': defaultdict(int),
-    'start_time': None
+    'start_time': None,
+    'connection_times': {}
 }
 
 # Sniffers globaux
@@ -158,6 +159,7 @@ def get_gateway_info(wan_iface):
             gateway_ip, iface = gws['default'][netifaces.AF_INET]
             if iface == wan_iface:
                 mac = resolve_mac_address(gateway_ip, wan_iface)
+                # ✅ CORRECTION: Accepter toute MAC valide (pas seulement broadcast)
                 if mac and mac != "ff:ff:ff:ff:ff:ff":
                     logger.info(f"Passerelle détectée: {gateway_ip} -> {mac}")
                     return gateway_ip, mac
@@ -177,7 +179,6 @@ def get_gateway_info(wan_iface):
     except Exception as e:
         logger.error(f"Erreur obtention passerelle: {e}")
         return None, "ff:ff:ff:ff:ff:ff"
-
 
 def check_interface_status(iface):
     """Vérifie si l'interface est active et configurée."""
@@ -247,33 +248,118 @@ def update_stats(protocol, packet_size):
         nat_stats['bytes_by_protocol'][protocol] += packet_size
 
 def create_nat_packet(packet, new_src_ip, new_sport, dest_mac, src_iface):
-    """Crée un nouveau paquet avec translation NAT."""
-    new_packet = packet.copy()
+    """Crée un nouveau paquet avec translation NAT - VERSION OPTIMISÉE."""
+    # ✅ SOLUTION: Créer un nouveau paquet au lieu de copier pour éviter la corruption
+    ip_layer = packet[IP]
     
-    # Modifier Ethernet
-    new_packet[Ether].dst = dest_mac
-    new_packet[Ether].src = get_if_hwaddr(src_iface)
+    # Construire la nouvelle couche IP
+    new_ip = IP(
+        version=ip_layer.version,
+        ihl=ip_layer.ihl,
+        tos=ip_layer.tos,
+        len=None,  # Auto-calculé
+        id=ip_layer.id,
+        flags=ip_layer.flags,
+        frag=ip_layer.frag,
+        ttl=max(1, ip_layer.ttl - 1),
+        proto=ip_layer.proto,
+        chksum=None,  # Auto-calculé
+        src=new_src_ip,
+        dst=ip_layer.dst,
+        options=ip_layer.options if hasattr(ip_layer, 'options') else []
+    )
     
-    # Modifier IP
-    new_packet[IP].src = new_src_ip
-    new_packet[IP].ttl = max(1, new_packet[IP].ttl - 1)
+    # Construire la couche transport
+    if packet.haslayer(TCP):
+        tcp_layer = packet[TCP]
+        new_l4 = TCP(
+            sport=new_sport,
+            dport=tcp_layer.dport,
+            seq=tcp_layer.seq,
+            ack=tcp_layer.ack,
+            dataofs=tcp_layer.dataofs,
+            reserved=tcp_layer.reserved,
+            flags=tcp_layer.flags,
+            window=tcp_layer.window,
+            chksum=None,  # Auto-calculé
+            urgptr=tcp_layer.urgptr,
+            options=tcp_layer.options if hasattr(tcp_layer, 'options') else []
+        )
+        # Copier le payload s'il existe
+        if hasattr(tcp_layer, 'payload') and tcp_layer.payload:
+            if hasattr(tcp_layer.payload, 'original'):
+                # Payload Scapy avec données
+                new_l4 = new_l4 / tcp_layer.payload
+            else:
+                # Payload déjà en bytes
+                new_l4 = new_l4 / bytes(tcp_layer.payload)
+            
+    elif packet.haslayer(UDP):
+        udp_layer = packet[UDP]
+        new_l4 = UDP(
+            sport=new_sport,
+            dport=udp_layer.dport,
+            len=None,  # Auto-calculé
+            chksum=None  # Auto-calculé
+        )
+        # Copier le payload s'il existe
+        if hasattr(udp_layer, 'payload') and udp_layer.payload:
+            if hasattr(udp_layer.payload, 'original'):
+                # Payload Scapy avec données
+                new_l4 = new_l4 / udp_layer.payload
+            else:
+                # Payload déjà en bytes
+                new_l4 = new_l4 / bytes(udp_layer.payload)
+            
+    elif packet.haslayer(ICMP):
+        icmp_layer = packet[ICMP]
+        new_l4 = ICMP(
+            type=icmp_layer.type,
+            code=icmp_layer.code,
+            chksum=None,  # Auto-calculé
+            id=new_sport,  # Utiliser le nouveau "port" comme ID
+            seq=icmp_layer.seq if hasattr(icmp_layer, 'seq') else 0
+        )
+        # Copier le payload s'il existe
+        if hasattr(icmp_layer, 'payload') and icmp_layer.payload:
+            if hasattr(icmp_layer.payload, 'original'):
+                # Payload Scapy avec données
+                new_l4 = new_l4 / icmp_layer.payload
+            else:
+                # Payload déjà en bytes
+                new_l4 = new_l4 / bytes(icmp_layer.payload)
+    else:
+        # Protocole non supporté, copier tel quel la couche suivante
+        if hasattr(packet[IP], 'payload') and packet[IP].payload:
+            new_l4 = packet[IP].payload
     
-    # Modifier port source selon le protocole
-    if new_packet.haslayer(TCP):
-        new_packet[TCP].sport = new_sport
-        del new_packet[TCP].chksum
-    elif new_packet.haslayer(UDP):
-        new_packet[UDP].sport = new_sport
-        del new_packet[UDP].chksum
-    # ICMP n'a pas de ports, on utilise l'ID
-    elif new_packet.haslayer(ICMP):
-        new_packet[ICMP].id = new_sport
-        del new_packet[ICMP].chksum
+    # Construire la couche Ethernet
+    new_eth = Ether(
+        dst=dest_mac,
+        src=get_if_hwaddr(src_iface),
+        type=0x0800  # IP
+    )
     
-    # Supprimer checksum IP pour recalcul
-    del new_packet[IP].chksum
+    # Assembler le paquet final
+    new_packet = new_eth / new_ip / new_l4
     
     return new_packet
+
+def safe_sendp(packet, iface, max_retries=3):
+    """Envoie un paquet avec gestion d'erreur et retry."""
+    for attempt in range(max_retries):
+        try:
+            # ✅ SOLUTION: Utiliser sendp avec les bons paramètres
+            sendp(packet, iface=iface, verbose=0, realtime=True)
+            return True
+        except Exception as e:
+            logger.debug(f"Tentative {attempt + 1} échouée sur {iface}: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(0.001)  # Petite pause avant retry
+            else:
+                logger.warning(f"Échec envoi paquet sur {iface} après {max_retries} tentatives: {e}")
+                return False
+    return False
 
 def handle_outgoing(packet, lan_iface, wan_iface, wan_ip, wan_mac, lan_network):
     """Traite les paquets sortants (LAN → WAN)."""
@@ -292,6 +378,7 @@ def handle_outgoing(packet, lan_iface, wan_iface, wan_ip, wan_mac, lan_network):
         # Mise à jour des statistiques
         update_stats(proto_name, len(packet))
 
+        # ✅ CORRECTION: Gestion cohérente des clés NAT
         if has_ports:
             # Protocoles avec ports (TCP, UDP)
             src_port = l4.sport
@@ -320,17 +407,17 @@ def handle_outgoing(packet, lan_iface, wan_iface, wan_ip, wan_mac, lan_network):
             else:
                 public_port = nat_table[key][1]
 
-        # Résoudre la MAC de destination si nécessaire
-        if wan_mac == "ff:ff:ff:ff:ff:ff":
-            dest_mac = resolve_mac_address(ip.dst, wan_iface)
-            if not dest_mac:
-                dest_mac = wan_mac
-        else:
-            dest_mac = wan_mac
+            # ✅ Enregistrer le moment d'activité pour nettoyage
+            nat_stats['connection_times'][key] = time.time()
+
+        # ✅ CORRECTION ARP: Toujours utiliser la MAC de la passerelle pour les destinations externes
+        dest_mac = wan_mac
 
         # Créer et envoyer le paquet modifié
         new_packet = create_nat_packet(packet, wan_ip, public_port, dest_mac, wan_iface)
-        sendp(new_packet, iface=wan_iface, verbose=0)
+        
+        # ✅ SOLUTION: Utiliser sendp avec gestion d'erreur
+        safe_sendp(new_packet, wan_iface)
         
     except Exception as e:
         logger.error(f"Erreur dans handle_outgoing: {e}")
@@ -376,26 +463,87 @@ def handle_incoming(packet, wan_iface, lan_iface, wan_ip):
         if not dest_mac:
             dest_mac = "ff:ff:ff:ff:ff:ff"  # Broadcast fallback
 
-        # Créer le paquet de retour
-        new_packet = packet.copy()
-        new_packet[Ether].dst = dest_mac
-        new_packet[Ether].src = get_if_hwaddr(lan_iface)
-        new_packet[IP].dst = orig_ip
-        new_packet[IP].ttl = max(1, new_packet[IP].ttl - 1)
+        # ✅ SOLUTION: Créer proprement le paquet de retour
+        ip_layer = packet[IP]
         
+        # Nouvelle couche IP
+        new_ip = IP(
+            version=ip_layer.version,
+            ihl=ip_layer.ihl,
+            tos=ip_layer.tos,
+            len=None,  # Auto-calculé
+            id=ip_layer.id,
+            flags=ip_layer.flags,
+            frag=ip_layer.frag,
+            ttl=max(1, ip_layer.ttl - 1),
+            proto=ip_layer.proto,
+            chksum=None,  # Auto-calculé
+            src=ip_layer.src,
+            dst=orig_ip,
+            options=ip_layer.options if hasattr(ip_layer, 'options') else []
+        )
+        
+        # Construire la couche transport avec le port original
         if proto_name == "TCP":
-            new_packet[TCP].dport = orig_port
-            del new_packet[TCP].chksum
+            tcp_layer = packet[TCP]
+            new_l4 = TCP(
+                sport=tcp_layer.sport,
+                dport=orig_port,
+                seq=tcp_layer.seq,
+                ack=tcp_layer.ack,
+                dataofs=tcp_layer.dataofs,
+                reserved=tcp_layer.reserved,
+                flags=tcp_layer.flags,
+                window=tcp_layer.window,
+                chksum=None,
+                urgptr=tcp_layer.urgptr,
+                options=tcp_layer.options if hasattr(tcp_layer, 'options') else []
+            )
+            if hasattr(tcp_layer, 'payload') and tcp_layer.payload:
+                if hasattr(tcp_layer.payload, 'original'):
+                    new_l4 = new_l4 / tcp_layer.payload
+                else:
+                    new_l4 = new_l4 / bytes(tcp_layer.payload)
+                
         elif proto_name == "UDP":
-            new_packet[UDP].dport = orig_port
-            del new_packet[UDP].chksum
+            udp_layer = packet[UDP]
+            new_l4 = UDP(
+                sport=udp_layer.sport,
+                dport=orig_port,
+                len=None,
+                chksum=None
+            )
+            if hasattr(udp_layer, 'payload') and udp_layer.payload:
+                if hasattr(udp_layer.payload, 'original'):
+                    new_l4 = new_l4 / udp_layer.payload
+                else:
+                    new_l4 = new_l4 / bytes(udp_layer.payload)
+                
         elif proto_name == "ICMP":
-            new_packet[ICMP].id = orig_port
-            del new_packet[ICMP].chksum
+            icmp_layer = packet[ICMP]
+            new_l4 = ICMP(
+                type=icmp_layer.type,
+                code=icmp_layer.code,
+                chksum=None,
+                id=orig_port,  # Restaurer l'ID original
+                seq=icmp_layer.seq if hasattr(icmp_layer, 'seq') else 0
+            )
+            if hasattr(icmp_layer, 'payload') and icmp_layer.payload:
+                if hasattr(icmp_layer.payload, 'original'):
+                    new_l4 = new_l4 / icmp_layer.payload
+                else:
+                    new_l4 = new_l4 / bytes(icmp_layer.payload)
         
-        del new_packet[IP].chksum
+        # Nouvelle couche Ethernet
+        new_eth = Ether(
+            dst=dest_mac,
+            src=get_if_hwaddr(lan_iface),
+            type=0x0800
+        )
         
-        sendp(new_packet, iface=lan_iface, verbose=0)
+        # Assembler et envoyer
+        new_packet = new_eth / new_ip / new_l4
+        safe_sendp(new_packet, lan_iface)
         
     except Exception as e:
         logger.error(f"Erreur dans handle_incoming: {e}")
@@ -432,6 +580,7 @@ def start_nat(lan_iface, wan_iface):
             nat_stats['total_bytes'] = 0
             nat_stats['packets_by_protocol'].clear()
             nat_stats['bytes_by_protocol'].clear()
+            nat_stats['connection_times'].clear()
 
     except Exception as e:
         logger.error(f"Erreur récupération interfaces: {e}")
@@ -483,6 +632,8 @@ def start_nat(lan_iface, wan_iface):
         wan_sniffer.start()
 
         logger.info("✅ NAT démarré avec succès")
+        # Démarrer le thread de nettoyage
+        threading.Thread(target=nat_cleanup_worker, daemon=True).start()        
         return True
 
     except Exception as e:
@@ -512,6 +663,7 @@ def stop_nat():
         reverse_nat_table.clear()
         used_ports.clear()
         arp_cache.clear()
+        nat_stats['connection_times'].clear()
 
     logger.info("✅ NAT arrêté et tables nettoyées")
     return True
@@ -542,5 +694,46 @@ def clear_nat_tables():
         nat_table.clear()
         reverse_nat_table.clear()
         used_ports.clear()
+        nat_stats['connection_times'].clear()
     logger.info("Tables NAT vidées")
     return True
+
+def nat_cleanup_worker(interval=60, timeout=120):
+    """Nettoie les entrées NAT inactives depuis plus de `timeout` secondes."""
+    while True:
+        time.sleep(interval)
+        now = time.time()
+        with lock:
+            expired_keys = []
+            for key, (wan_ip, public_port) in list(nat_table.items()):
+                entry_time = nat_stats['connection_times'].get(key, 0)
+                if now - entry_time > timeout:
+                    expired_keys.append(key)
+            
+            for key in expired_keys:
+                wan_ip, public_port = nat_table[key]
+                proto_name = key[2]
+                
+                # Supprimer de toutes les tables
+                del nat_table[key]
+                reverse_key = (wan_ip, public_port, proto_name)
+                reverse_nat_table.pop(reverse_key, None)
+                used_ports.discard(public_port)
+                nat_stats['connection_times'].pop(key, None)
+                
+        if expired_keys:
+            logger.info(f"🧹 Nettoyage NAT: {len(expired_keys)} connexions supprimées")
+# 1. Ajouter la gestion de la MTU et fragmentation
+def get_interface_mtu(iface):
+    """Obtient la MTU d'une interface."""
+    try:
+        import subprocess
+        result = subprocess.run(['ip', 'link', 'show', iface], 
+                              capture_output=True, text=True)
+        for line in result.stdout.split('\n'):
+            if 'mtu' in line:
+                mtu = int(line.split('mtu ')[1].split()[0])
+                return mtu
+        return 1500  # MTU par défaut
+    except:
+        return 1500

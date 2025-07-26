@@ -1,6 +1,6 @@
 {
     "lan_interface": "wlp0s20f3",
-    "wan_interface": "enxaec71492bd4f",
+    "wan_interface": "enx02da2de90c04",
     "enabled_protocols": [
         "ALL"
     ],

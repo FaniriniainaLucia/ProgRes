@@ -1,0 +1,126 @@
+from scapy.all import sniff, AsyncSniffer, IP, TCP, UDP, send
+import logging
+import ipaddress
+import random
+
+# Supprimer les logs Scapy inutiles
+logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
+
+# Interfaces réseau
+sniff_iface = "wlp0s20f3"           # Interface LAN
+out_iface = "enx02da2de90c04"       # Interface Internet
+real_source_ip = "192.168.45.2"     # IP NAT publique
+
+# Sous-réseau local
+local_network = ipaddress.IPv4Network("10.42.0.0/24")
+
+# Tables NAT
+nat_table = {}        # (lan_ip, lan_port, dst_ip, dst_port, proto) → (nat_port)
+reverse_nat = {}      # (dst_ip, dst_port, proto) → (lan_ip, lan_port)
+
+# Utiliser un port NAT unique
+used_nat_ports = set()
+def get_free_nat_port():
+    while True:
+        port = random.randint(10000, 60000)
+        if port not in used_nat_ports:
+            used_nat_ports.add(port)
+            return port
+
+def is_external(ip):
+    try:
+        return ipaddress.IPv4Address(ip) not in local_network
+    except ValueError:
+        return True
+
+# ---------- Traitement des paquets sortants ----------
+def process_packet(pkt):
+    if IP not in pkt:
+        return
+
+    ip_pkt = pkt[IP]
+    proto = "TCP" if pkt.haslayer(TCP) else "UDP" if pkt.haslayer(UDP) else None
+    if proto is None:
+        return
+
+    l4 = pkt[TCP] if proto == "TCP" else pkt[UDP]
+
+    if not is_external(ip_pkt.dst):
+        return
+
+    nat_port = get_free_nat_port()
+
+    # Logs compacts
+    flags = ""
+    if proto == "TCP":
+        flags = l4.sprintf("%TCP.flags%")
+    print(f"[{proto}] {ip_pkt.src}:{l4.sport} → {ip_pkt.dst}:{l4.dport} [{flags}]")
+
+    # Entrée dans table NAT
+    nat_table[(ip_pkt.src, l4.sport, ip_pkt.dst, l4.dport, proto)] = nat_port
+    reverse_nat[(ip_pkt.dst, nat_port, proto)] = (ip_pkt.src, l4.sport)
+    print(f"[+] NAT: {ip_pkt.src}:{l4.sport} → {real_source_ip}:{nat_port} ({proto})")
+
+    # Modification du paquet
+    fwd_pkt = pkt.copy()
+    fwd_pkt[IP].src = real_source_ip
+    fwd_pkt[l4.name].sport = nat_port
+    del fwd_pkt[IP].chksum
+    del fwd_pkt[IP].len
+    del fwd_pkt[l4.name].chksum
+
+    try:
+        send(fwd_pkt, iface=out_iface, verbose=0)
+    except Exception as e:
+        print(f"[!] Erreur d'envoi: {e}")
+
+# ---------- Sniffer de retour (Internet → LAN) ----------
+def start_return_sniffer():
+    def handle_response(pkt):
+        if IP not in pkt:
+            return
+
+        ip_pkt = pkt[IP]
+        proto = "TCP" if pkt.haslayer(TCP) else "UDP" if pkt.haslayer(UDP) else None
+        if proto is None:
+            return
+
+        l4 = pkt[TCP] if proto == "TCP" else pkt[UDP]
+        key = (ip_pkt.src, l4.sport, proto)
+
+        print(f"[↩] {proto} {ip_pkt.src}:{l4.sport} → {ip_pkt.dst}:{l4.dport}")
+
+        if (ip_pkt.dst, l4.dport, proto) not in reverse_nat:
+            print(f"[x] Pas de correspondance NAT pour: {ip_pkt.src}:{l4.sport} ({proto})")
+            return
+
+        lan_ip, lan_port = reverse_nat[(ip_pkt.dst, l4.dport, proto)]
+        print(f"[=] NAT retour: {ip_pkt.src}:{l4.sport} → {lan_ip}:{lan_port}")
+
+        # Modifier destination IP et port
+        fwd_pkt = pkt.copy()
+        fwd_pkt[IP].dst = lan_ip
+        fwd_pkt[l4.name].dport = lan_port
+
+        del fwd_pkt[IP].chksum
+        del fwd_pkt[IP].len
+        del fwd_pkt[l4.name].chksum
+
+        try:
+            send(fwd_pkt, iface=sniff_iface, verbose=0)
+        except Exception as e:
+            print(f"[!] Erreur NAT retour: {e}")
+
+    return AsyncSniffer(iface=out_iface, prn=handle_response, filter="ip", store=0)
+
+# ---------- Lancement ----------
+sniffer = start_return_sniffer()
+sniffer.start()
+
+print(f"[*] Sniffing sur {sniff_iface} (LAN) ... Ctrl+C pour arrêter.")
+try:
+    sniff(iface=sniff_iface, prn=process_packet, filter="ip", store=0)
+except KeyboardInterrupt:
+    print("\n[!] Arrêt demandé.")
+finally:
+    sniffer.stop()
