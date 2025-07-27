@@ -1,131 +1,226 @@
-from scapy.all import sniff, AsyncSniffer, IP, TCP, UDP, send
+#!/usr/bin/env python3
+import argparse
 import logging
-import ipaddress
 import random
+import threading
+import time
+from ipaddress import ip_network, ip_address,IPv4Network
+import psutil
 
-# Réduction des logs
-logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
+from scapy.all import (
+    AsyncSniffer,
+    IP, TCP, UDP, ICMP,
+    send,
+    get_if_list, get_if_addr
+)
 
-# Interfaces réseau
-sniff_iface = "wlp0s20f3"           # LAN
-out_iface = "enx02da2de90c04"       # WAN
-real_source_ip = "192.168.45.2"     # IP NAT publique
+# ——————————————————————————————————————————————
+# 1) Logging
+# ——————————————————————————————————————————————
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.FileHandler("nat.log"), logging.StreamHandler()]
+)
+logger = logging.getLogger("nat")
 
-# Sous-réseau local
-local_network = ipaddress.IPv4Network("10.42.0.0/24")
-
-# Tables NAT
-nat_table = {}        # (lan_ip, lan_port, dst_ip, dst_port, proto) → nat_port
-reverse_nat = {}      # (dst_ip, nat_port, proto) → (lan_ip, lan_port)
-used_nat_ports = set()
-
-def get_free_nat_port():
-    while True:
-        port = random.randint(10000, 60000)
-        if port not in used_nat_ports:
-            used_nat_ports.add(port)
-            return port
-
-def is_external(ip):
+def get_network_from_iface(iface):
     try:
-        return ipaddress.IPv4Address(ip) not in local_network
-    except ValueError:
-        return True
+        addrs = psutil.net_if_addrs().get(iface)
+        if not addrs:
+            raise ValueError(f"Aucune adresse trouvée pour l'interface {iface}")
+        for addr in addrs:
+            if addr.family.name == 'AF_INET':
+                ip = addr.address
+                netmask = addr.netmask
+                network = IPv4Network(f"{ip}/{netmask}", strict=False)
+                logger.info(f"Détection automatique du réseau LAN: {ip}/{netmask} -> {network}")
+                return network
+        raise ValueError(f"Aucune adresse IPv4 valide trouvée sur l'interface {iface}")
+    except Exception:
+        logger.exception(f"Erreur lors de la détection du réseau de l'interface {iface}")
+        raise
 
-# === Paquets sortants (LAN → WAN) ===
-def process_packet(pkt):
-    if IP not in pkt:
-        return
-    ip_pkt = pkt[IP]
+# ——————————————————————————————————————————————
+# 2) Parse des arguments
+# ——————————————————————————————————————————————
+try:
+    parser = argparse.ArgumentParser(
+        description="NAT IP simple couche 3 (sans IPv6) avec AsyncSniffer"
+    )
+    parser.add_argument("--lan-iface", help="Interface LAN")
+    parser.add_argument("--wan-iface", help="Interface WAN")
+    parser.add_argument("--lan-net", help="Réseau LAN (ex. 192.168.1.0/24)")
+    parser.add_argument("--timeout", type=int, default=300, help="Timeout des entrées NAT (sec)")
+    args = parser.parse_args()
 
-    proto = None
-    l4 = None
-    if pkt.haslayer(TCP):
-        proto = "TCP"
-        l4 = pkt[TCP]
-    elif pkt.haslayer(UDP):
-        proto = "UDP"
-        l4 = pkt[UDP]
+    if not args.lan_iface or not args.wan_iface:
+        ifaces = get_if_list()
+        print("Interfaces disponibles :")
+        for idx, iface in enumerate(ifaces):
+            print(f" [{idx}] {iface} (IP: {get_if_addr(iface)})")
+        if not args.lan_iface:
+            idx = int(input("Sélectionne l'index de l'interface LAN : "))
+            args.lan_iface = ifaces[idx]
+        if not args.wan_iface:
+            idx = int(input("Sélectionne l'index de l'interface WAN : "))
+            args.wan_iface = ifaces[idx]
+
+    LAN_IFACE = args.lan_iface
+    WAN_IFACE = args.wan_iface
+    WAN_IP = ip_address(get_if_addr(WAN_IFACE))
+    if args.lan_net:
+        LAN_NET = ip_network(args.lan_net)
     else:
-        return
+        LAN_NET = get_network_from_iface(args.lan_iface)
+    TTL = args.timeout
 
-    if not is_external(ip_pkt.dst):
-        return
+    print(f"Interface LAN   : {LAN_IFACE} -> IP: {get_if_addr(LAN_IFACE)}")
+    print(f"Réseau LAN      : {LAN_NET}")
+    print(f"Interface WAN   : {WAN_IFACE} -> IP: {WAN_IP}")
+    print(f"Timeout NAT     : {TTL} secondes")
+except Exception:
+    logger.exception("Erreur lors de la configuration initiale.")
+    exit(1)
 
-    nat_port = get_free_nat_port()
-    nat_table[(ip_pkt.src, l4.sport, ip_pkt.dst, l4.dport, proto)] = nat_port
-    reverse_nat[(ip_pkt.dst, nat_port, proto)] = (ip_pkt.src, l4.sport)
+# ——————————————————————————————————————————————
+# 3) Tables NAT
+# ——————————————————————————————————————————————
+nat_table = {}
+reverse_nat = {}
+timestamps = {}
 
-    # Affichage
-    flag_str = ""
-    if proto == "TCP":
-        flags = l4.flags
-        if flags & 0x02: flag_str += "SYN "
-        if flags & 0x10: flag_str += "ACK "
-        if flags & 0x01: flag_str += "FIN "
-    print(f"[{proto}] {ip_pkt.src}:{l4.sport} → {ip_pkt.dst}:{l4.dport} [{flag_str.strip()}]")
-
-    print(f"[+] NAT: {ip_pkt.src}:{l4.sport} → {real_source_ip}:{nat_port} ({proto})")
-
-    # Construction du paquet NATé
-    fwd_pkt = pkt.copy()
-    fwd_pkt[IP].src = real_source_ip
-    fwd_pkt[l4.name].sport = nat_port
-    del fwd_pkt[IP].len, fwd_pkt[IP].chksum, fwd_pkt[l4.name].chksum
-
+# ——————————————————————————————————————————————
+# 4) Obtenir un port libre
+# ——————————————————————————————————————————————
+def get_free_port():
     try:
-        send(fwd_pkt, verbose=0)
-    except Exception as e:
-        print(f"[!] Erreur d'envoi: {e}")
+        while True:
+            p = random.randint(1025, 65535)
+            if all(v[1] != p for v in nat_table.values()):
+                return p
+    except Exception:
+        logger.exception("Erreur dans get_free_port()")
 
-# === Paquets de retour (WAN → LAN) ===
-def start_return_sniffer():
-    def handle_response(pkt):
-        if IP not in pkt:
-            return
-        ip_pkt = pkt[IP]
+# ——————————————————————————————————————————————
+# 5) Nettoyage périodique
+# ——————————————————————————————————————————————
+def cleaner():
+    try:
+        while True:
+            now = time.time()
+            expired = [k for k, t in timestamps.items() if now - t > TTL]
+            for k in expired:
+                w = nat_table.pop(k, None)
+                if w:
+                    reverse_nat.pop(w, None)
+                    logger.info(f"Timeout NAT supprimé : {k} -> {w}")
+                timestamps.pop(k, None)
+            time.sleep(TTL / 2)
+    except Exception:
+        logger.exception("Erreur dans le thread cleaner()")
 
-        # On ne traite que les paquets qui reviennent vers notre IP publique
-        if ip_pkt.dst != real_source_ip:
-            return
+threading.Thread(target=cleaner, daemon=True).start()
 
-        # Identifier le protocole et couche 4
-        proto = None
-        l4 = None
-        if pkt.haslayer(TCP):
-            proto = "TCP"
-            l4 = pkt[TCP]
-        elif pkt.haslayer(UDP):
-            proto = "UDP"
-            l4 = pkt[UDP]
+# ——————————————————————————————————————————————
+# 6) Traitement des paquets LAN (SNAT)
+# ——————————————————————————————————————————————
+def handle_lan(pkt):
+    try:
+        if not pkt.haslayer(IP): return
+        ip = pkt[IP]
+        logger.warning(f"Paquet LAN sniffé {(ip.dst)}")
+        if ip.dst in LAN_NET: return
+
+        l4 = pkt.getlayer(TCP) or pkt.getlayer(UDP) or pkt.getlayer(ICMP)
+        sport = getattr(l4, "sport", None)
+        if sport is None: return
+
+        key = (ip.src, sport)
+        timestamps[key] = time.time()
+
+        if key in nat_table:
+            wtuple = nat_table[key]
         else:
-            return  # Ignore les autres types
+            p = get_free_port()
+            wtuple = (str(WAN_IP), p)
+            nat_table[key] = wtuple
+            reverse_nat[wtuple] = key
+            logger.info(f"Nouveau NAT : {key} -> {wtuple}")
 
-        key = (ip_pkt.dst, l4.dport, proto)
-        print(f"[↩] {proto} {ip_pkt.src}:{l4.sport} → {ip_pkt.dst}:{l4.dport}")
+        new = pkt.copy()
+        new[IP].src = wtuple[0]
+        if hasattr(new.getlayer(l4.name), "sport"):
+            new.getlayer(l4.name).sport = wtuple[1]
 
-        if key not in reverse_nat:
-            print(f"[x] ❌ Pas de correspondance NAT pour {key}")
-            print(f"[debug] Clés reverse_nat connues : {list(reverse_nat.keys())}")
+        del new[IP].chksum
+        if new.haslayer(TCP): del new[TCP].chksum
+        if new.haslayer(UDP): del new[UDP].chksum
+        if new.haslayer(ICMP): del new[ICMP].chksum
+
+        send(new, iface=WAN_IFACE, verbose=False)
+        proto = {1:'ICMP', 6:'TCP',17:'UDP'}.get(new.proto, str(new.proto))
+        flags = getattr(new.getlayer(TCP), 'flags', '')
+        logger.info(f"SNAT {ip.src}:{sport} -> {new[IP].src}:{wtuple[1]} (proto={proto}{' flags='+str(flags) if flags else ''})")
+
+    except Exception:
+        logger.exception("Erreur dans handle_lan()")
+
+# ——————————————————————————————————————————————
+# 7) Traitement des paquets WAN (DNAT)
+# ——————————————————————————————————————————————
+def handle_wan(pkt):
+    try:
+        if not pkt.haslayer(IP): return
+        ip = pkt[IP]
+        if ip.dst != str(WAN_IP): return
+
+        l4 = pkt.getlayer(TCP) or pkt.getlayer(UDP) or pkt.getlayer(ICMP)
+        dport = getattr(l4, 'dport', None)
+        if dport is None: return
+
+        rev = reverse_nat.get((str(WAN_IP), dport))
+        if not rev:
+            logger.warning(f"No mapping pour {(ip.dst, dport)}")
             return
 
-        # Correspondance trouvée
-        lan_ip, lan_port = reverse_nat[key]
-        print(f"[=] ✅ Correspondance NAT trouvée : {ip_pkt.src}:{l4.sport} → {lan_ip}:{lan_port} ({proto})")
+        new = pkt.copy()
+        new[IP].dst = rev[0]
+        if hasattr(new.getlayer(l4.name), 'dport'):
+            new.getlayer(l4.name).dport = rev[1]
+
+        del new[IP].chksum
+        if new.haslayer(TCP): del new[TCP].chksum
+        if new.haslayer(UDP): del new[UDP].chksum
+        if new.haslayer(ICMP): del new[ICMP].chksum
+
+        send(new, iface=LAN_IFACE, verbose=False)
+        proto = {1:'ICMP',6:'TCP',17:'UDP'}.get(new.proto, str(new.proto))
+        flags = getattr(new.getlayer(TCP), 'flags', '')
+        logger.info(f"DNAT {ip.src}:{l4.sport} -> {new[IP].dst}:{rev[1]} (proto={proto}{' flags='+str(flags) if flags else ''})")
+    except Exception:
+        logger.exception("Erreur dans handle_wan()")
 
 
-    return AsyncSniffer(iface=out_iface, prn=handle_response, filter="ip", store=0)
-
-# === Lancement ===
+# ——————————————————————————————————————————————
+# 8) Démarrage
+# ——————————————————————————————————————————————
 if __name__ == "__main__":
-    print(f"[*] Démarrage du NAT entre {sniff_iface} (LAN) et {out_iface} (Internet)")
-
-    sniffer = start_return_sniffer()
-    sniffer.start()
-
     try:
-        sniff(iface=sniff_iface, prn=process_packet, filter="ip", store=0)
+        logger.info(f"LAN={LAN_IFACE}({LAN_NET}), WAN={WAN_IFACE}({WAN_IP})")
+        lan_sniffer = AsyncSniffer(iface=LAN_IFACE, prn=handle_lan, filter="ip", store=False)
+        wan_sniffer = AsyncSniffer(iface=WAN_IFACE, prn=handle_wan, filter="ip", store=False)
+
+        lan_sniffer.start()
+        wan_sniffer.start()
+        logger.info("Sniffers démarrés (Ctrl+C pour stop)")
+
+        lan_sniffer.join()
+        wan_sniffer.join()
     except KeyboardInterrupt:
-        print("\n[!] Arrêt demandé.")
-    finally:
-        sniffer.stop()
+        logger.info("Arrêt en cours…")
+        lan_sniffer.stop()
+        wan_sniffer.stop()
+        logger.info("Terminé.")
+    except Exception:
+        logger.exception("Erreur critique dans le bloc main()")
